@@ -1,14 +1,15 @@
 import re
 import operator
 import requests
-import time
+import sqlite3
 from bs4 import BeautifulSoup
-from typing import Annotated, List, TypedDict
+from typing import Annotated, List, TypedDict, Optional
 
 from langchain_ollama import ChatOllama
 from langchain_community.tools import DuckDuckGoSearchResults
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 # --- RICH FORMATTING IMPORTS ---
 from rich.console import Console
@@ -21,15 +22,22 @@ console = Console()
 
 # --- CONFIGURATION ---
 MODEL_CONFIG = {
-    "planner": "qwen3:14b",      
-    "researcher": "qwen3:14b",  
-    "writer": "qwen3:14b",      
-    "skeptic": "phi4-reasoning:plus", 
-    "editor": "ministral-3:14b"           
+    "planner": "qwen3:14b",
+    "researcher": "qwen3:14b",
+    "writer": "qwen3:14b",
+    "editor": "ministral-3:14b",
+    
+    # MULTI-SKEPTIC LIST
+    "skeptics": [
+        "phi4-reasoning:plus",
+        "ministral-3:14b",
+        "rnj-1:latest"
+    ]
 }
 
 # --- TOOLING ---
 search_tool = DuckDuckGoSearchResults(num_results=3)
+max_loop = 2
 
 def scrape_text(url: str):
     """Fetches and cleans text from a URL for deep reading."""
@@ -58,9 +66,15 @@ def clean_text(text: str) -> str:
     cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     return cleaned.strip()
 
-def run_llm(role: str, user_prompt: str, system_prompt: str = None, temperature=0.1) -> str:
-    """Centralized LLM runner with auto-cleaning."""
-    model_name = MODEL_CONFIG[role]
+def run_llm(role: str, user_prompt: str, system_prompt: str = None, temperature=0.1, model_override: str = None) -> str:
+    """Centralized LLM runner with auto-cleaning and model override support."""
+    
+    # 1. Determine Model Name
+    if model_override:
+        model_name = model_override
+    else:
+        model_name = MODEL_CONFIG[role]
+
     llm = ChatOllama(model=model_name, temperature=temperature)
     
     messages = []
@@ -78,6 +92,7 @@ def run_llm(role: str, user_prompt: str, system_prompt: str = None, temperature=
 class AgentState(TypedDict):
     topic: str
     research_plan: List[str]
+    # 'operator.add' ensures we append to the list rather than overwriting it when merging states
     research_notes: Annotated[List[str], operator.add] 
     current_draft: str
     critiques: List[str]
@@ -200,32 +215,43 @@ def quorum_node(state: AgentState):
     draft = state["current_draft"]
     critiques = []
     
-    # --- ACTIVE SKEPTIC ---
-    with console.status("[red]Skeptic: Hunting for weak claims...", spinner="grenade"):
-        identify_prompt = (
-            f"Read this draft:\n{draft[:4000]}...\n\n"
-            "Identify the single most questionable empirical claim that lacks citation or seems biased.\n"
-            "Generate a search query to FIND COUNTER-EVIDENCE for this claim.\n"
-            "Output ONLY the search query."
-        )
-        skeptic_query = run_llm("skeptic", identify_prompt, temperature=0.1).strip().replace('"', '')
+    skeptic_models = MODEL_CONFIG["skeptics"]
     
-    console.print(f"  [red bold]Skeptic Audit:[/red bold] Checking '{skeptic_query}'")
-    skeptic_evidence = search_tool.invoke(skeptic_query)
-    
-    with console.status("[red]Skeptic: Formulating critique...", spinner="grenade"):
-        critique_prompt = (
-            f"Draft Text:\n{draft[:4000]}...\n\n"
-            f"External Evidence Found via '{skeptic_query}':\n{skeptic_evidence}\n\n"
-            "Write a critique of the draft explicitly referencing this external evidence.\n"
-            "Point out where the draft contradicts reality or lacks nuance based on the search results."
-        )
-        critiques.append(run_llm("skeptic", critique_prompt, temperature=0.3))
-    
+    # --- MULTI-SKEPTIC LOOP ---
+    for model in skeptic_models:
+        console.print(f"[bold red]► Running Skeptic Model:[/bold red] [white]{model}[/white]")
+        
+        # 1. IDENTIFY
+        with console.status(f"[red]{model}: Hunting for weak claims...", spinner="grenade"):
+            identify_prompt = (
+                f"Read this draft:\n{draft[:4000]}...\n\n"
+                "Identify the single most questionable empirical claim that lacks citation or seems biased.\n"
+                "Generate a search query to FIND COUNTER-EVIDENCE for this claim.\n"
+                "Output ONLY the search query."
+            )
+            # Use model_override to force the specific skeptic
+            skeptic_query = run_llm("skeptic", identify_prompt, temperature=0.1, model_override=model).strip().replace('"', '')
+        
+        console.print(f"  [red]Query:[/red] {skeptic_query}")
+        
+        # 2. SEARCH
+        skeptic_evidence = search_tool.invoke(skeptic_query)
+        
+        # 3. CRITIQUE
+        with console.status(f"[red]{model}: Formulating critique...", spinner="grenade"):
+            critique_prompt = (
+                f"Draft Text:\n{draft[:4000]}...\n\n"
+                f"External Evidence Found via '{skeptic_query}':\n{skeptic_evidence}\n\n"
+                "Write a critique of the draft explicitly referencing this external evidence.\n"
+                "Point out where the draft contradicts reality or lacks nuance based on the search results."
+            )
+            critique = run_llm("skeptic", critique_prompt, temperature=0.3, model_override=model)
+            critiques.append(f"### Critique from {model}:\n{critique}")
+            
     # --- EDITOR (Structure) ---
     with console.status("[blue]Editor: Reviewing structure...", spinner="bouncingBar"):
         prompt_editor = f"Critique the structure. Is the introduction strong? Are the headers logical?\n{draft[:6000]}..."
-        critiques.append(run_llm("editor", prompt_editor, temperature=0.1))
+        critiques.append(f"### Editor Critique:\n{run_llm('editor', prompt_editor, temperature=0.1)}")
     
     return {"critiques": critiques}
 
@@ -253,7 +279,6 @@ def refiner_node(state: AgentState):
     )
     
     with console.status("[green]Refining Text & Fixing Citations...", spinner="dots12"):
-        # You might want to boost temperature slightly (0.2 -> 0.3) or use a smarter model here if possible
         content = run_llm("writer", prompt, system_prompt=system, temperature=0.25)
         
     return {"current_draft": content, "loop_count": state["loop_count"] + 1}
@@ -261,11 +286,15 @@ def refiner_node(state: AgentState):
 # --- GRAPH CONSTRUCTION ---
 
 def should_continue(state: AgentState):
-    if state["loop_count"] < 2: 
+    if state["loop_count"] < max_loop: 
         console.print(Panel("Critique feedback loop triggered.", style="bold yellow"))
         return "loop"
     console.print(Panel("Research limit reached. Finalizing.", style="bold green"))
     return "end"
+
+# 1. SETUP SQLITE CHECKPOINTER
+# This creates a local file 'checkpoints.sqlite' to store state
+memory = SqliteSaver.from_conn_string("checkpoints.sqlite")
 
 workflow = StateGraph(AgentState)
 workflow.add_node("planner", planner_node)
@@ -281,18 +310,56 @@ workflow.add_edge("writer", "quorum")
 workflow.add_edge("quorum", "refiner")
 workflow.add_conditional_edges("refiner", should_continue, {"loop": "planner", "end": END})
 
-app = workflow.compile()
+# 2. COMPILE WITH MEMORY
+app = workflow.compile(checkpointer=memory)
 
 # --- RUN ---
 if __name__ == "__main__":
     console.print(Panel.fit("[bold white]Deep Research Agent[/bold white]", style="blue"))
-    topic = console.input("[bold yellow]Enter research topic:[/bold yellow] ")
     
-    inputs = {"topic": topic, "research_plan": [], "research_notes": [], "current_draft": "", "critiques": [], "loop_count": 0}
+    # 3. ASK FOR SESSION ID
+    session_id = console.input("[bold yellow]Enter Session ID (or press Enter for new): [/bold yellow]").strip()
+    topic = ""
     
-    final_state = app.invoke(inputs)
-    
-    with open("deep_research_report.md", "w", encoding="utf-8") as f:
+    if not session_id:
+        # New Session
+        import uuid
+        session_id = str(uuid.uuid4())[:8]
+        topic = console.input("[bold yellow]Enter research topic:[/bold yellow] ")
+        console.print(f"[dim]Starting new session: {session_id}[/dim]")
+        
+        inputs = {"topic": topic, "research_plan": [], "research_notes": [], "current_draft": "", "critiques": [], "loop_count": 0}
+        config = {"configurable": {"thread_id": session_id}}
+        
+        # Run from scratch
+        final_state = app.invoke(inputs, config=config)
+    else:
+        # Resume Session
+        config = {"configurable": {"thread_id": session_id}}
+        # Check if state exists
+        current_state = app.get_state(config)
+        
+        if current_state.values:
+            console.print(f"[green]Found existing session '{session_id}'[/green]")
+            last_topic = current_state.values.get("topic", "Unknown")
+            console.print(f"Topic: {last_topic}")
+            
+            # Resume logic: We pass None to inputs to resume from last state
+            console.print("[dim]Resuming...[/dim]")
+            
+            # If the graph was finished (END), we need to decide what to do.
+            # For now, we assume if you resume, you might want to run another loop or just see the result.
+            # If it was stuck in middle, it continues.
+            final_state = app.invoke(None, config=config) 
+        else:
+            console.print(f"[red]No session found for ID '{session_id}'. Starting new.[/red]")
+            topic = console.input("[bold yellow]Enter research topic:[/bold yellow] ")
+            inputs = {"topic": topic, "research_plan": [], "research_notes": [], "current_draft": "", "critiques": [], "loop_count": 0}
+            final_state = app.invoke(inputs, config=config)
+
+    # Save output
+    filename = f"report_{session_id}.md"
+    with open(filename, "w", encoding="utf-8") as f:
         f.write(final_state["current_draft"])
     
-    console.print(f"\n[bold green]Done![/bold green] Report saved to 'deep_research_report.md'")
+    console.print(f"\n[bold green]Done![/bold green] Report saved to '{filename}'")
