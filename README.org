@@ -1,0 +1,4 @@
+#+author: Preston Pan
+#+description: a vibe coded deep research tool written in python
+* Deep Research
+This is a deep research tool.

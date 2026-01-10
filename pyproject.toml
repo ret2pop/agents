@@ -1,0 +1,35 @@
+[tool.poetry]
+name = "deep-research"
+version = "0.1.0"
+description = ""
+authors = ["Preston Pan <ret2pop@gmail.com>"]
+
+[project]
+name = "deep-research"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Preston Pan",email = "ret2pop@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.13,<4.0.0"
+dependencies = [
+    "langchain (>=1.2.3,<2.0.0)",
+    "langgraph (>=1.0.5,<2.0.0)",
+    "duckduckgo-search (>=8.1.1,<9.0.0)",
+    "langchain-ollama (>=1.0.1,<2.0.0)",
+    "langchain-community (>=0.4.1,<0.5.0)",
+    "ddgs (>=9.10.0,<10.0.0)",
+    "beautifulsoup4 (>=4.14.3,<5.0.0)",
+    "requests (>=2.32.5,<3.0.0)",
+    "rich (>=14.2.0,<15.0.0)"
+]
+
+[dependency-groups]
+dev = [
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
