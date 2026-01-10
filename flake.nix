@@ -15,43 +15,52 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         
-        # 1. Initialize the poetry2nix toolset with your system's packages
-        p2n = poetry2nix.lib.mkPoetry2Nix { inherit pkgs; };
+        # 1. SETUP
+        # Use Python 3.11 (Standard for AI/Data Science stability)
+        # Avoids conflicts with system tools that might rely on 3.12
+        myPython = pkgs.python311; 
 
-        # 2. Extract the functions AND the default overrides from that initialized set
+        p2n = poetry2nix.lib.mkPoetry2Nix { inherit pkgs; };
         inherit (p2n) mkPoetryEnv mkPoetryApplication defaultPoetryOverrides;
 
-        # 3. Build the environment
+        # 2. BUILD THE VIRTUAL ENV
         appEnv = mkPoetryEnv {
           projectDir = ./.;
-          python = pkgs.python311;
+          python = myPython;
+          preferWheels = true; # Speed up builds significantly
           
-          # Now 'defaultPoetryOverrides' is available here
           overrides = defaultPoetryOverrides.extend (self: super: {
-            # Fixes for specific packages if needed
-            # cryptography = super.cryptography.overridePythonAttrs (old: {
-            #   buildInputs = (old.buildInputs or []) ++ [ pkgs.openssl ];
-            # });
+            # Add overrides here if specific packages fail to build
           });
         };
 
+        # 3. BUILD THE APP (Optional)
         app = mkPoetryApplication {
           projectDir = ./.;
-          python = pkgs.python311;
+          python = myPython;
         };
 
       in
       {
         devShells.default = pkgs.mkShell {
-          buildInputs = [
+          # 'packages' adds tools to the PATH. 
+          # appEnv goes FIRST to ensure 'python' resolves to your env, not Poetry's internal python.
+          packages = [ 
             appEnv
             pkgs.poetry
             pkgs.ollama
           ];
 
+          # Clean up environment variables to prevent conflicts
           shellHook = ''
+            # Unset PYTHONPATH so we don't accidentally load system libs
+            unset PYTHONPATH
+            
             echo "🔬 Epistemic Clean Room Active"
-            echo "Python: $(python --version)"
+            echo "--------------------------------"
+            echo "Python Location: $(which python)"
+            echo "Python Version:  $(python --version)"
+            echo "Environment:     Native Nix (No .venv required)"
           '';
         };
 

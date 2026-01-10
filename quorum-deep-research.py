@@ -112,7 +112,11 @@ def planner_node(state: AgentState):
         response = run_llm("planner", prompt)
         plan = [line.strip().replace("- ", "").replace("* ", "") for line in response.split('\n') if line.strip()]
     
-    console.print(f"[cyan]Plan:[/cyan] {plan}")
+    console.print(f"[bold cyan]Research Plan:[/bold cyan]")
+    for i, query in enumerate(plan, 1):
+        console.print(f"  [cyan]{i}.[/cyan] {query}")
+    console.print("") # spacing
+
     return {"research_plan": plan}
 
 def researcher_node(state: AgentState):
@@ -228,18 +232,29 @@ def quorum_node(state: AgentState):
 def refiner_node(state: AgentState):
     draft = state["current_draft"]
     critiques = "\n".join(state["critiques"])
+    # Pass notes so the refiner can verify/rebuild the bibliography
+    flat_notes = "\n".join(state["research_notes"])
     
     console.print(Panel("Applying Critiques", title="[bold green]REFINER[/bold green]", border_style="green"))
     
-    system = "You are a text editor engine. Output the rewritten text ONLY. No preamble."
+    system = "You are a specialized academic editor."
+    
+    # STRICTER PROMPT
     prompt = (
-        f"Critiques to Apply:\n{critiques}\n\n"
         f"Original Draft:\n{draft}\n\n"
-        "Rewrite the draft to address the critiques. Maintain the citations and length."
+        f"Critiques to Apply:\n{critiques}\n\n"
+        f"Reference Notes (for citations):\n{flat_notes}\n\n"
+        "Instructions:\n"
+        "1. Rewrite the draft to address the critiques.\n"
+        "2. CRITICAL: You must PRESERVE or RE-INSERT inline citations (e.g., [1], [2]) for every specific claim (numbers, dates, study results).\n"
+        "3. DO NOT summarize the citations at the end. You must append a full 'References' section listing the actual URLs/Titles from the Reference Notes.\n"
+        "4. If a claim is made without a citation, check the Reference Notes and add the matching citation.\n"
+        "5. Output the full, final polished report."
     )
     
-    with console.status("[green]Refining Text...", spinner="dots12"):
-        content = run_llm("writer", prompt, system_prompt=system, temperature=0.2)
+    with console.status("[green]Refining Text & Fixing Citations...", spinner="dots12"):
+        # You might want to boost temperature slightly (0.2 -> 0.3) or use a smarter model here if possible
+        content = run_llm("writer", prompt, system_prompt=system, temperature=0.25)
         
     return {"current_draft": content, "loop_count": state["loop_count"] + 1}
 
