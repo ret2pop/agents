@@ -17,27 +17,28 @@ from rich.panel import Panel
 from rich.markdown import Markdown
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.style import Style
+from rich.box import ROUNDED
 
 console = Console()
 
 # --- CONFIGURATION ---
 MODEL_CONFIG = {
-    "planner": "qwen3:14b",
+    "global_planner": "qwen3:14b", # High-level outliner
+    "planner": "qwen3:14b",        # Specific section researcher
     "researcher": "qwen3:14b",
     "writer": "qwen3:14b",
     "editor": "ministral-3:14b",
     
     # MULTI-SKEPTIC LIST
     "skeptics": [
-        "phi4-reasoning:plus",
-        "ministral-3:14b",
-        "rnj-1:latest"
+        "cogito:14b",
+        "qwen3:14b",
     ]
 }
 
 # --- TOOLING ---
-search_tool = DuckDuckGoSearchResults(num_results=3)
-max_loop = 2
+search_tool = DuckDuckGoSearchResults(num_results=10)
+max_loop = 2 # Max loops PER SECTION
 
 def scrape_text(url: str):
     """Fetches and cleans text from a URL for deep reading."""
@@ -66,10 +67,28 @@ def clean_text(text: str) -> str:
     cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     return cleaned.strip()
 
+def pretty_print_queries(queries: List[str], topic: str):
+    """
+    Renders a stylized panel for research queries to the console.
+    """
+    # Format the content with numbered steps
+    content = ""
+    for i, query in enumerate(queries, 1):
+        content += f"[bold cyan]{i}.[/bold cyan] [white]{query}[/white]\n"
+    
+    # Create a compact panel
+    console.print(Panel(
+        content.strip(),
+        title=f"[bold yellow]Research Plan: {topic}[/bold yellow]",
+        border_style="cyan",
+        box=ROUNDED,
+        padding=(1, 2),
+        expand=False
+    ))
+
 def run_llm(role: str, user_prompt: str, system_prompt: str = None, temperature=0.1, model_override: str = None) -> str:
     """Centralized LLM runner with auto-cleaning and model override support."""
     
-    # 1. Determine Model Name
     if model_override:
         model_name = model_override
     else:
@@ -90,276 +109,370 @@ def run_llm(role: str, user_prompt: str, system_prompt: str = None, temperature=
 
 # --- STATE ---
 class AgentState(TypedDict):
-    topic: str
+    # GLOBAL STATE
+    main_topic: str
+    section_plan: List[str]       # The Todo List
+    completed_sections: List[str] # The finished text blocks
+    current_section_idx: int      # Where we are in the list
+    final_report: str             # The output
+
+    # LOCAL STATE (Per Section)
+    topic: str                    # Current sub-topic
     research_plan: List[str]
-    # 'operator.add' ensures we append to the list rather than overwriting it when merging states
-    research_notes: Annotated[List[str], operator.add] 
+    # Removed operator.add annotation to allow clearing/overwriting between sections
+    research_notes: List[str]      
     current_draft: str
     critiques: List[str]
     loop_count: int
 
 # --- NODES ---
 
-def planner_node(state: AgentState):
+def global_planner_node(state: AgentState):
+    """Generates the Table of Contents."""
+    main_topic = state["main_topic"]
+    
+    console.print(Panel(f"Mapping: {main_topic}", title="[bold white]GLOBAL PLANNER[/bold white]", style="white"))
+    
+    prompt = (
+        f"Topic: {main_topic}\n"
+        "Create a logical outline for a comprehensive report on this topic.\n"
+        "Return a list of 4 to 6 distinct section headers (e.g., 'Historical Context', 'Technical Implementation').\n"
+        "Do NOT include an Introduction or Conclusion in this list (I will add those automatically).\n"
+        "CRITICAL RULE: Your outline must be NEUTRAL and INVESTIGATIVE.\n"
+        " - BAD: 'The Benefits of X' (Assumes there are benefits)\n"
+        " - GOOD: 'Analysis of Impact of X' (Allows for positive or negative findings)\n"
+        " - BAD: 'How X Solves Y' (Assumes it solves it)\n"
+        " - GOOD: 'Evaluation of X as a Solution for Y'\n"
+        "Return ONLY the list of headers, separated by newlines."
+    )
+    
+    response = run_llm("global_planner", prompt)
+    sections = [line.strip().replace("- ", "").replace("* ", "") for line in response.split('\n') if line.strip()]
+    
+    console.print("[white]Global Plan:[/white]")
+    for s in sections:
+        console.print(f" - {s}")
+        
+    return {
+        "section_plan": sections, 
+        "current_section_idx": 0, 
+        "completed_sections": [],
+        # Initialize local state
+        "research_notes": [],
+        "critiques": []
+    }
+
+def section_initiator_node(state: AgentState):
+    """Prepares state for the next section."""
+    idx = state["current_section_idx"]
+    sections = state["section_plan"]
+    
+    current_topic = sections[idx]
+    
+    console.print(Panel(f"Starting Section {idx+1}/{len(sections)}: {current_topic}", style="bold blue"))
+    
+    # We RESET local variables here so the previous section doesn't contaminate the new one
+    return {
+        "topic": current_topic,
+        "loop_count": 0,
+        "research_plan": [],
+        "research_notes": [],  # Start fresh for this section
+        "current_draft": "",
+        "critiques": []
+    }
+
+def deep_researcher_node(state: AgentState):
+    """(Formerly Planner) Generates queries for the CURRENT SECTION."""
     loop_count = state.get("loop_count", 0)
     topic = state["topic"]
+    main_topic = state["main_topic"]
     critiques = state.get("critiques", [])
     
-    # Visual Header
-    console.print(Panel(f"Iteration: {loop_count+1}\nTopic: {topic}", title="[bold cyan]PLANNER[/bold cyan]", border_style="cyan"))
-    
-    with console.status("[bold cyan]Generating Research Plan...", spinner="dots"):
+    with console.status(f"[cyan]Planning research for: {topic}...", spinner="dots"):
         if loop_count == 0:
             prompt = (
-                f"Topic: {topic}\n"
-                "Generate 3 highly specific search queries to gather deep technical or historical context.\n"
+                f"Main Report Topic: {main_topic}\n"
+                f"Current Section: {topic}\n"
+                "Generate 3 highly specific search queries to gather information specifically for this section.\n"
                 "Return ONLY the queries as a list, separated by newlines."
             )
         else:
             critique_text = "\n".join(critiques)
             prompt = (
-                f"Topic: {topic}\n"
-                f"Address these gaps identified by the Skeptic: {critique_text}\n"
-                "Generate 2 NEW search queries to fill these specific gaps.\n"
+                f"Section: {topic}\n"
+                f"Address these gaps: {critique_text}\n"
+                "Generate 2 NEW search queries to fill these gaps.\n"
                 "Return ONLY the queries as a list, separated by newlines."
             )
 
         response = run_llm("planner", prompt)
         plan = [line.strip().replace("- ", "").replace("* ", "") for line in response.split('\n') if line.strip()]
-    
-    console.print(f"[bold cyan]Research Plan:[/bold cyan]")
-    for i, query in enumerate(plan, 1):
-        console.print(f"  [cyan]{i}.[/cyan] {query}")
-    console.print("") # spacing
 
+    pretty_print_queries(plan, topic)
     return {"research_plan": plan}
 
 def researcher_node(state: AgentState):
     plan = state["research_plan"]
+    # We must explicitly grab current notes because we removed operator.add
+    existing_notes = state["research_notes"] 
     new_notes = []
-    
-    console.print(Panel(f"Executing {len(plan)} search queries", title="[bold yellow]RESEARCHER[/bold yellow]", border_style="yellow"))
     
     for query in plan:
         with console.status(f"[yellow]Searching: {query}...", spinner="earth"):
             search_results = search_tool.invoke(query)
             
-            # Selector
             selector_prompt = (
-                f"Query: {query}\n"
-                f"Search Results: {search_results}\n\n"
-                "Analyze the results. Return the single best URL that is likely to contain detailed, long-form information.\n"
-                "Return ONLY the URL. Nothing else."
+                f"Query: {query}\nSearch Results: {search_results}\n\n"
+                "Return the single best URL for deep reading. Return ONLY the URL."
             )
             best_url = run_llm("planner", selector_prompt).strip()
         
         if "http" not in best_url:
-            console.print(f"  [red]No valid URL found for:[/red] {query}")
             new_notes.append(f"### Findings for '{query}':\n{search_results}\n")
             continue
 
-        console.print(f"  [green]Reading:[/green] {best_url}")
-        
-        with console.status("[yellow]Scraping & Extracting...", spinner="bouncingBall"):
+        with console.status(f"[yellow]Reading: {best_url}...", spinner="bouncingBall"):
             page_content = scrape_text(best_url)
-            
             extraction_prompt = (
-                f"Query: {query}\n"
-                f"Source URL: {best_url}\n"
-                f"Page Content (Truncated): {page_content}\n\n"
-                "Extract comprehensive, detailed findings, statistics, and arguments from this text.\n"
-                "Capture specific numbers and dates.\n"
-                "Format: [Fact] (Source: URL)"
+                f"Query: {query}\nSource: {best_url}\nContent: {page_content}\n\n"
+                "Extract comprehensive findings, statistics, and arguments.\nFormat: [Fact] (Source: URL)\n"
+                "If the source is not relevant to the query, then use the format [no relevant facts found] (Source: URL)"
             )
             summary = run_llm("researcher", extraction_prompt)
             new_notes.append(f"### Deep Dive on '{query}':\n{summary}\n")
 
-    return {"research_notes": new_notes}
+    # Manually append since we aren't using operator.add
+    return {"research_notes": existing_notes + new_notes}
 
 def writer_node(state: AgentState):
     topic = state["topic"]
+    main_topic = state["main_topic"]
     flat_notes = "\n".join(state["research_notes"])
     current_draft = state.get("current_draft", "")
     loop_count = state.get("loop_count", 0)
     
-    console.print(Panel("Synthesizing Report", title="[bold magenta]WRITER[/bold magenta]", border_style="magenta"))
-    system = "You are a report generation engine. Output Markdown only. No conversational text."
+    system = "You are a technical writer."
     
-    with console.status("[magenta]Writing Draft...", spinner="aesthetic"):
-        if loop_count == 0:
-            prompt = (
-                f"Write a definitive, long-form report on: {topic}.\n"
-                f"Research Notes:\n{flat_notes}\n\n"
-                "Requirements:\n"
-                "1. Deeply detailed, academic tone.\n"
-                "2. Use H2 and H3 headers.\n"
-                "3. Cite sources inline [1] matching the URLs in the notes.\n"
-                "4. Output ONLY the report."
-            )
-        else:
-            prompt = (
-                f"Expand the report on {topic}.\n"
-                f"Current Draft:\n{current_draft}\n\n"
-                f"New Research Notes:\n{flat_notes}\n\n"
-                "Integrate the new findings. Make the report longer and more comprehensive.\n"
-                "Output the FULL updated report."
-            )
+    if loop_count == 0:
+        prompt = (
+            f"Context: Writing a report on '{main_topic}'.\n"
+            f"Current Section to write: {topic}\n"
+            f"Research Notes:\n{flat_notes}\n\n"
+            "Write this specific section. Do not write a whole intro/conclusion for the whole report, just this part.\n"
+            "Use academic tone. Cite sources inline [1].\n"
+            "Output ONLY the section text."
+        )
+    else:
+        prompt = (
+            f"Refine the section: {topic}.\n"
+            f"Current Draft:\n{current_draft}\n\n"
+            f"New Notes:\n{flat_notes}\n\n"
+            "Integrate new findings. Output the updated section.\n"
+            "Determine if the critiques are valid first before integrating them.\n"
+            "Also make sure to retain all cited sources and their inline citations [1]."
+        )
 
-        content = run_llm("writer", prompt, system_prompt=system, temperature=0.3)
-    
-    console.print(f"[magenta]Draft Generated[/magenta] ({len(content)} chars)")
+    content = run_llm("writer", prompt, system_prompt=system, temperature=0.3)
     return {"current_draft": content}
 
 def quorum_node(state: AgentState):
-    console.print(Panel("Reviewing Draft", title="[bold red]QUORUM DELIBERATION[/bold red]", border_style="red"))
     draft = state["current_draft"]
     critiques = []
-    
     skeptic_models = MODEL_CONFIG["skeptics"]
     
-    # --- MULTI-SKEPTIC LOOP ---
+    console.print(f"[bold red]Running Quorum on Section Draft...[/bold red]")
+    
     for model in skeptic_models:
-        console.print(f"[bold red]► Running Skeptic Model:[/bold red] [white]{model}[/white]")
+        identify_prompt = (
+            f"Draft:\n{draft[:4000]}...\n\n"
+            "Identify one weak/unverified claim. Generate a search query to check it.\n"
+            "Output ONLY the search query."
+        )
+        skeptic_query = run_llm("skeptic", identify_prompt, temperature=0.1, model_override=model).strip().replace('"', '')
         
-        # 1. IDENTIFY
-        with console.status(f"[red]{model}: Hunting for weak claims...", spinner="grenade"):
-            identify_prompt = (
-                f"Read this draft:\n{draft[:4000]}...\n\n"
-                "Identify the single most questionable empirical claim that lacks citation or seems biased.\n"
-                "Generate a search query to FIND COUNTER-EVIDENCE for this claim.\n"
-                "Output ONLY the search query."
-            )
-            # Use model_override to force the specific skeptic
-            skeptic_query = run_llm("skeptic", identify_prompt, temperature=0.1, model_override=model).strip().replace('"', '')
-        
-        console.print(f"  [red]Query:[/red] {skeptic_query}")
-        
-        # 2. SEARCH
+        # Quick search check
         skeptic_evidence = search_tool.invoke(skeptic_query)
         
-        # 3. CRITIQUE
-        with console.status(f"[red]{model}: Formulating critique...", spinner="grenade"):
-            critique_prompt = (
-                f"Draft Text:\n{draft[:4000]}...\n\n"
-                f"External Evidence Found via '{skeptic_query}':\n{skeptic_evidence}\n\n"
-                "Write a critique of the draft explicitly referencing this external evidence.\n"
-                "Point out where the draft contradicts reality or lacks nuance based on the search results."
-            )
-            critique = run_llm("skeptic", critique_prompt, temperature=0.3, model_override=model)
-            critiques.append(f"### Critique from {model}:\n{critique}")
-            
-    # --- EDITOR (Structure) ---
-    with console.status("[blue]Editor: Reviewing structure...", spinner="bouncingBar"):
-        prompt_editor = f"Critique the structure. Is the introduction strong? Are the headers logical?\n{draft[:6000]}..."
-        critiques.append(f"### Editor Critique:\n{run_llm('editor', prompt_editor, temperature=0.1)}")
+        critique_prompt = (
+            f"Draft:\n{draft[:4000]}...\n"
+            f"Evidence found for '{skeptic_query}':\n{skeptic_evidence}\n\n"
+            "Critique the draft based on this evidence. Be harsh but constructive.\n"
+            "If the source is not relevant then critique the draft based on weak links.\n"
+            "Include all the critiques that you can think of."
+        )
+
+        critique = run_llm("skeptic", critique_prompt, temperature=0.3, model_override=model)
+        critiques.append(f"[{model}]: {critique}")
     
     return {"critiques": critiques}
 
 def refiner_node(state: AgentState):
     draft = state["current_draft"]
     critiques = "\n".join(state["critiques"])
-    # Pass notes so the refiner can verify/rebuild the bibliography
     flat_notes = "\n".join(state["research_notes"])
     
-    console.print(Panel("Applying Critiques", title="[bold green]REFINER[/bold green]", border_style="green"))
-    
-    system = "You are a specialized academic editor."
-    
-    # STRICTER PROMPT
     prompt = (
         f"Original Draft:\n{draft}\n\n"
-        f"Critiques to Apply:\n{critiques}\n\n"
-        f"Reference Notes (for citations):\n{flat_notes}\n\n"
-        "Instructions:\n"
-        "1. Rewrite the draft to address the critiques.\n"
-        "2. CRITICAL: You must PRESERVE or RE-INSERT inline citations (e.g., [1], [2]) for every specific claim (numbers, dates, study results).\n"
-        "3. DO NOT summarize the citations at the end. You must append a full 'References' section listing the actual URLs/Titles from the Reference Notes.\n"
-        "4. If a claim is made without a citation, check the Reference Notes and add the matching citation.\n"
-        "5. Output the full, final polished report."
+        f"Critiques:\n{critiques}\n\n"
+        f"Notes:\n{flat_notes}\n\n"
+        "Rewrite the draft to address critiques. Preserve citations. Output the final section text.\n"
+        "First determine if the critique is worth addressing before addressing them."
     )
     
-    with console.status("[green]Refining Text & Fixing Citations...", spinner="dots12"):
-        content = run_llm("writer", prompt, system_prompt=system, temperature=0.25)
-        
+    content = run_llm("writer", prompt, temperature=0.25)
     return {"current_draft": content, "loop_count": state["loop_count"] + 1}
 
-# --- GRAPH CONSTRUCTION ---
+def section_compiler_node(state: AgentState):
+    """Saves the finished section and moves to the next."""
+    finished_section_text = state["current_draft"]
+    current_idx = state["current_section_idx"]
+    topic = state["topic"]
+    
+    # Store the result
+    completed = state["completed_sections"]
+    completed.append(f"## {topic}\n\n{finished_section_text}\n\n")
+    
+    console.print(Panel(f"Section '{topic}' Completed", style="bold green"))
+    
+    return {
+        "completed_sections": completed,
+        "current_section_idx": current_idx + 1
+    }
 
-def should_continue(state: AgentState):
-    if state["loop_count"] < max_loop: 
-        console.print(Panel("Critique feedback loop triggered.", style="bold yellow"))
+def final_editor_node(state: AgentState):
+    """Stitches everything together."""
+    main_topic = state["main_topic"]
+    raw_body = "\n".join(state["completed_sections"])
+    
+    console.print(Panel("Finalizing Report...", title="[bold magenta]FINAL EDITOR[/bold magenta]"))
+    
+    prompt = (
+        f"Topic: {main_topic}\n"
+        f"Here are the drafted sections:\n{raw_body}\n\n"
+        "Instructions:\n"
+        "1. Write a strong Introduction summarizing the topic.\n"
+        "2. Include the provided sections in order.\n"
+        "3. Write a Conclusion.\n"
+        "4. Smooth out transitions between sections if they feel disjointed.\n"
+        "5. Compile a 'References' section at the bottom based on the URLs found in the text.\n"
+        "6. Preserve the citations [1] where they belong.\n"
+        "7. Turn bullet points into FULL PARAGRAPHS.\n"
+        "Output the final Markdown report."
+    )
+    
+    final_report = run_llm("editor", prompt, temperature=0.2)
+    return {"final_report": final_report}
+
+# --- EDGES & ROUTING ---
+
+def check_section_loop(state: AgentState):
+    if state["loop_count"] < max_loop:
         return "loop"
-    console.print(Panel("Research limit reached. Finalizing.", style="bold green"))
-    return "end"
+    return "done"
+
+def check_global_progress(state: AgentState):
+    if state["current_section_idx"] < len(state["section_plan"]):
+        return "next_section"
+    return "finalize"
 
 # 1. SETUP SQLITE CHECKPOINTER
-# This creates a local file 'checkpoints.sqlite' to store state
 memory = SqliteSaver.from_conn_string("checkpoints.sqlite")
 
 workflow = StateGraph(AgentState)
-workflow.add_node("planner", planner_node)
+
+# Global Nodes
+workflow.add_node("global_planner", global_planner_node)
+workflow.add_node("section_initiator", section_initiator_node)
+workflow.add_node("section_compiler", section_compiler_node)
+workflow.add_node("final_editor", final_editor_node)
+
+# Deep Research Sub-Nodes
+workflow.add_node("deep_researcher", deep_researcher_node) # Renamed from planner
 workflow.add_node("researcher", researcher_node)
 workflow.add_node("writer", writer_node)
 workflow.add_node("quorum", quorum_node)
 workflow.add_node("refiner", refiner_node)
 
-workflow.set_entry_point("planner")
-workflow.add_edge("planner", "researcher")
+# Edges
+workflow.set_entry_point("global_planner")
+workflow.add_edge("global_planner", "section_initiator")
+
+# Start Local Loop
+workflow.add_edge("section_initiator", "deep_researcher")
+workflow.add_edge("deep_researcher", "researcher")
 workflow.add_edge("researcher", "writer")
 workflow.add_edge("writer", "quorum")
 workflow.add_edge("quorum", "refiner")
-workflow.add_conditional_edges("refiner", should_continue, {"loop": "planner", "end": END})
+
+# Inner Loop Conditional
+workflow.add_conditional_edges(
+    "refiner", 
+    check_section_loop, 
+    {
+        "loop": "deep_researcher", 
+        "done": "section_compiler"
+    }
+)
+
+# Global Loop Conditional
+workflow.add_conditional_edges(
+    "section_compiler",
+    check_global_progress,
+    {
+        "next_section": "section_initiator",
+        "finalize": "final_editor"
+    }
+)
+
+workflow.add_edge("final_editor", END)
 
 # 2. COMPILE WITH MEMORY
 app = workflow.compile(checkpointer=memory)
 
 # --- RUN ---
 if __name__ == "__main__":
-    console.print(Panel.fit("[bold white]Deep Research Agent[/bold white]", style="blue"))
+    console.print(Panel.fit("[bold white]Deep Research Agent v2[/bold white]", style="blue"))
     
-    # 3. ASK FOR SESSION ID
-    session_id = console.input("[bold yellow]Enter Session ID (or press Enter for new): [/bold yellow]").strip()
-    topic = ""
-    
-    if not session_id:
-        # New Session
-        import uuid
-        session_id = str(uuid.uuid4())[:8]
-        topic = console.input("[bold yellow]Enter research topic:[/bold yellow] ")
-        console.print(f"[dim]Starting new session: {session_id}[/dim]")
-        
-        inputs = {"topic": topic, "research_plan": [], "research_notes": [], "current_draft": "", "critiques": [], "loop_count": 0}
-        config = {"configurable": {"thread_id": session_id}}
-        
-        # Run from scratch
-        final_state = app.invoke(inputs, config=config)
-    else:
-        # Resume Session
-        config = {"configurable": {"thread_id": session_id}}
-        # Check if state exists
-        current_state = app.get_state(config)
-        
-        if current_state.values:
-            console.print(f"[green]Found existing session '{session_id}'[/green]")
-            last_topic = current_state.values.get("topic", "Unknown")
-            console.print(f"Topic: {last_topic}")
-            
-            # Resume logic: We pass None to inputs to resume from last state
-            console.print("[dim]Resuming...[/dim]")
-            
-            # If the graph was finished (END), we need to decide what to do.
-            # For now, we assume if you resume, you might want to run another loop or just see the result.
-            # If it was stuck in middle, it continues.
-            final_state = app.invoke(None, config=config) 
-        else:
-            console.print(f"[red]No session found for ID '{session_id}'. Starting new.[/red]")
-            topic = console.input("[bold yellow]Enter research topic:[/bold yellow] ")
-            inputs = {"topic": topic, "research_plan": [], "research_notes": [], "current_draft": "", "critiques": [], "loop_count": 0}
-            final_state = app.invoke(inputs, config=config)
+    with SqliteSaver.from_conn_string("checkpoints.sqlite") as memory:
+        app = workflow.compile(checkpointer=memory)
 
-    # Save output
-    filename = f"report_{session_id}.md"
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(final_state["current_draft"])
-    
-    console.print(f"\n[bold green]Done![/bold green] Report saved to '{filename}'")
+        session_id = console.input("[bold yellow]Enter Session ID (or press Enter): [/bold yellow]").strip()
+        topic = ""
+        
+        if not session_id:
+            import uuid
+            session_id = str(uuid.uuid4())[:8]
+            topic = console.input("[bold yellow]Enter MAIN research topic:[/bold yellow] ")
+            console.print(f"[dim]Starting new session: {session_id}[/dim]")
+            
+            inputs = {
+                "main_topic": topic, 
+                "section_plan": [], 
+                "completed_sections": [], 
+                "current_section_idx": 0,
+                # Initial dummy values for graph validation
+                "topic": "init",
+                "research_plan": [], 
+                "research_notes": [], 
+                "current_draft": "", 
+                "critiques": [], 
+                "loop_count": 0
+            }
+            config = {
+                "configurable": {"thread_id": session_id},
+                "recursion_limit": 150
+            }
+            final_state = app.invoke(inputs, config=config)
+        else:
+            config = {
+                "configurable": {"thread_id": session_id},
+                "recursion_limit": 150
+            }
+            console.print("[dim]Resuming...[/dim]")
+            final_state = app.invoke(None, config=config) 
+
+        filename = f"final_report_{session_id}.md"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(final_state["final_report"])
+        
+        console.print(f"\n[bold green]Done![/bold green] Report saved to '{filename}'")
