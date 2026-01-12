@@ -22,6 +22,7 @@ from pyagents.agents.deep_research_agent import research_app
 from pyagents.agents.math_agent import math_app
 from pyagents.tools.rag_tool import LocalLibrarian
 from pyagents.tools.search_tool import WebScout
+from pyagents.tools.memory_tool import MemoryManager
 from pyagents.config import ORCHESTRATOR_MODEL, VISION_MODEL, MAX_DEPTH
 from pyagents.utils import run_llm, run_vision_llm, clean_text, extract_code
 
@@ -164,12 +165,13 @@ def planner_node(state: OrchestratorState):
         return {"current_step": '{"tool": "FINISH", "query": "Max depth reached. Summarizing findings."}'}
 
     system_prompt = (
-        "You are the Research Director. You have 5 specialized departments:\n"
+        "You are the Research Director. You have 6 specialized departments:\n"
         "1. LIBRARIAN: Checks LOCAL files/codebase. Use for 'refactor', 'existing code', 'project context'.\n"
         "2. WEB_SCOUT: Quick internet search. Use for specific facts, docs, or recent events.\n"
         "3. DEEP_RESEARCH: Writes full markdown reports. Use for broad topics ('History of X', 'Analysis of Y'). This is slow, try to use sparingly as it takes time.\n"
         "4. MATH_LAB: Formal proofs. Use for 'prove that', 'theorem', 'lean4', or things that need to be proven without a doubt.\n"
-        "5. CODE_LAB: Simulations/Scripts. Use for 'plot', 'calculate', 'simulate', or finding answers to numerical questions of any kind.\n\n"
+        "5. CODE_LAB: Simulations/Scripts. Use for 'plot', 'calculate', 'simulate', or finding answers to numerical questions of any kind.\n"
+        "6. MEMORY: Access long-term memory of previous chats. Use to recall user preferences or past findings.\n\n"
         "Protocol:\n"
         "- Analyze the User Query and previous steps.\n"
         "- Decide the NEXT single step.\n"
@@ -236,6 +238,10 @@ def executor_node(state: OrchestratorState):
     elif tool == "CODE_LAB":
         tool_output = call_code_lab(query)
 
+    elif tool == "MEMORY":
+        console.print(f"\n[Orchestrator] 🧠 Consulting Memory Bank: '{query}'")
+        tool_output = memory_manager_instance.query(query)
+
     elif tool == "FINISH":
         return {"final_answer": query} # The query here is actually the summary
 
@@ -271,17 +277,48 @@ workflow.add_edge("executor", "planner")
 
 orchestrator_app = workflow.compile()
 
+def reflect_and_save(user_query: str, final_answer: str, plan: List[str]):
+    """Reflects on the session and saves key info to memory."""
+    console.print("\n[Orchestrator] 🤔 Reflecting on session...")
+
+    prompt = (
+        "Analyze the following interaction (User Query -> Plan -> Final Answer).\n"
+        "Identify any key facts, user preferences, or important findings that should be REMEMBERED for future sessions.\n"
+        "If nothing is worth saving (e.g. just a greeting or simple fact retrieval), return 'NO_MEMORY'.\n"
+        "Otherwise, return a concise summary of what to store.\n\n"
+        f"User Query: {user_query}\n"
+        f"Plan Steps: {plan}\n"
+        f"Final Answer: {final_answer}\n"
+    )
+
+    try:
+        response = run_llm(ORCHESTRATOR_MODEL, prompt, "You are a Memory Archivist.", temperature=0.1)
+        content = response.strip()
+
+        if "NO_MEMORY" in content or len(content) < 5:
+            console.print("[Orchestrator] Nothing important to save.")
+        else:
+            memory_manager_instance.save_memory(content)
+            console.print(Panel(content, title="Memory Saved", border_style="blue"))
+
+    except Exception as e:
+        console.print(f"[Orchestrator] Reflection failed: {e}")
+
 def main():
     # Make librarian_instance available to executor_node via global or argument injection
     # For now, we use global as in the original design, but better would be to pass it in state or config
     global librarian_instance
+    global memory_manager_instance
 
-    console.print(Panel("[bold white]META-ORCHESTRATOR[/bold white]\n[dim]Commanding: Math, Code, Web, Research, RAG[/dim]", style="red"))
+    console.print(Panel("[bold white]META-ORCHESTRATOR[/bold white]\n[dim]Commanding: Math, Code, Web, Research, RAG, Memory[/dim]", style="red"))
 
-    # 1. Initialize RAG
+    # 1. Initialize RAG & Memory
     path = pt_prompt("Project Path for RAG (default '.'): ", style=PtStyle.from_dict({'prompt': 'ansired bold'})) or "."
     librarian_instance = LocalLibrarian(path)
     librarian_instance.ingest()
+
+    memory_manager_instance = MemoryManager()
+    memory_manager_instance.ingest()
 
     # 2. Get User Query
     user_input = pt_prompt("\nResearch Request > ", style=PtStyle.from_dict({'prompt': 'ansicyan bold'}))
@@ -302,6 +339,9 @@ def main():
 
     console.print("\n\n")
     console.print(Panel(Markdown(final_state["final_answer"]), title="Final Response", border_style="green"))
+
+    # 5. Reflect
+    reflect_and_save(initial_state["user_query"], final_state["final_answer"], final_state["plan"])
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
