@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import List, Dict
 import requests
 from duckduckgo_search import DDGS
-from pyagents.config import BRAVE_API_KEY, MAX_SEARCH_RESULTS
+from pyagents.config import BRAVE_API_KEY, GOOGLE_API_KEY, GOOGLE_CSE_ID, MAX_SEARCH_RESULTS
 
 class SearchProvider(ABC):
     @abstractmethod
@@ -50,6 +50,41 @@ class BraveSearchProvider(SearchProvider):
             print(f"[BraveSearchProvider] Error: {e}")
             raise e
 
+class GoogleSearchProvider(SearchProvider):
+    def __init__(self, api_key: str = GOOGLE_API_KEY, cse_id: str = GOOGLE_CSE_ID):
+        self.api_key = api_key
+        self.cse_id = cse_id
+        self.base_url = "https://www.googleapis.com/customsearch/v1"
+
+    def search(self, query: str, max_results: int = 5) -> List[Dict]:
+        if not self.api_key or not self.cse_id:
+            raise ValueError("Google API key or CSE ID not provided")
+
+        params = {
+            "q": query,
+            "key": self.api_key,
+            "cx": self.cse_id,
+            "num": max_results
+        }
+
+        try:
+            response = requests.get(self.base_url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+
+            results = []
+            if 'items' in data:
+                for item in data['items']:
+                    results.append({
+                        'title': item.get('title', ''),
+                        'href': item.get('link', ''),
+                        'body': item.get('snippet', '')
+                    })
+            return results
+        except requests.exceptions.RequestException as e:
+            print(f"[GoogleSearchProvider] Error: {e}")
+            raise e
+
 class DuckDuckGoSearchProvider(SearchProvider):
     def search(self, query: str, max_results: int = 5) -> List[Dict]:
         results = []
@@ -69,21 +104,29 @@ class DuckDuckGoSearchProvider(SearchProvider):
 
 class HybridSearchProvider(SearchProvider):
     def __init__(self):
-        self.primary = BraveSearchProvider()
-        self.fallback = DuckDuckGoSearchProvider()
+        self.brave = BraveSearchProvider()
+        self.google = GoogleSearchProvider()
+        self.ddg = DuckDuckGoSearchProvider()
 
     def search(self, query: str, max_results: int = 5) -> List[Dict]:
-        # Try primary (Brave)
+        # Try Brave
         try:
             print(f"[HybridSearchProvider] Trying Brave Search for '{query}'...")
-            return self.primary.search(query, max_results)
+            return self.brave.search(query, max_results)
         except Exception as e:
             print(f"[HybridSearchProvider] Brave Search failed: {e}")
 
-        # Fallback to secondary (DuckDuckGo)
+        # Try Google
+        try:
+            print(f"[HybridSearchProvider] Falling back to Google Search for '{query}'...")
+            return self.google.search(query, max_results)
+        except Exception as e:
+            print(f"[HybridSearchProvider] Google Search failed: {e}")
+
+        # Fallback to DuckDuckGo
         try:
             print(f"[HybridSearchProvider] Falling back to DuckDuckGo for '{query}'...")
-            return self.fallback.search(query, max_results)
+            return self.ddg.search(query, max_results)
         except Exception as e:
             print(f"[HybridSearchProvider] DuckDuckGo Search failed: {e}")
             return []
