@@ -1,4 +1,121 @@
+#+title: PyAgents: Autonomous AI Agent Orchestration
 #+author: Preston Pan
-#+description: a vibe coded deep research tool written in python
-* Deep Research
-This is a deep research tool.
+#+options: toc:t num:nil
+
+* Introduction
+
+PyAgents is a comprehensive framework of autonomous AI agents designed to collaborate on complex tasks ranging from deep internet research to formal mathematical proofs and test-driven software development.
+
+At the core is a **Meta-Orchestrator** that intelligently delegates tasks to specialized departments (agents), effectively acting as a Research Director.
+
+* Features
+
+** 🧠 Orchestrator Agent
+The brain of the operation. It analyzes user queries and plans a multi-step execution path using specialized tools:
+- **Librarian**: Checks local files and codebase context.
+- **Web Scout**: Performs quick internet searches for specific facts.
+- **Deep Research**: Conducts in-depth research and writes full reports.
+- **Math Lab**: Proves theorems formally using Lean4.
+- **Code Lab**: Writes and verifies Python code for simulations and calculations.
+
+** 📚 Deep Research Agent
+A "vibe coded" deep research tool that:
+- Generates a Table of Contents for a given topic.
+- Iteratively performs deep web searches for each section.
+- Scrapes and reads content from relevant URLs.
+- Writes comprehensive sections with inline citations.
+- Uses a **Quorum** of skeptic models to critique and refine drafts.
+- Compiles a final Markdown report with references.
+
+** 💻 Coding Agent (Visual Scientist)
+A Test-Driven Development (TDD) agent that:
+- Writes a `pytest` test suite *before* writing the implementation.
+- Writes Python code to solve the objective and pass tests.
+- Executes the code and tests in a sandbox.
+- **Vision Verification**: Uses a Vision Language Model (VLM) to inspect generated plots/images and verify they match the objective.
+- Iteratively fixes code based on test failures or visual critiques.
+
+** 🧮 Math Agent (Triangle of Truth)
+A formal verification agent for mathematics:
+- **Theorist**: Sketches an informal proof strategy (LaTeX/English).
+- **Formalizer**: Translates the informal proof into **Lean4** code.
+- **Kernel**: Compiles the Lean4 code to verify the proof.
+- **Arbiter**: Analyzes compilation errors to decide if the issue is syntax-related (fix code) or logic-related (re-think strategy).
+
+** 🛠️ Helper Tools
+- **Web Scout**: A lightweight search tool using DuckDuckGo.
+- **Local Librarian**: A RAG (Retrieval-Augmented Generation) tool using FAISS and Ollama embeddings to query local documents/code.
+
+* Prerequisites
+
+- **Python**: >= 3.11
+- **Poetry**: For dependency management.
+- **Ollama**: For running local LLMs. You will need to pull the following models (or update `MODEL_CONFIG` in the files):
+  - `qwen2.5-coder:14b` (Coding, Math, Orchestrator)
+  - `qwen2.5-vl:7b` or `qwen3-vl:8b` (Vision verification)
+  - `qwen3:14b` (Research)
+  - `ministral-3:14b` (Research Editor)
+  - `cogito:14b` (Research Skeptic)
+  - `nomic-embed-text-v2-moe:latest` (Embeddings)
+- **Lean4**: Required for the Math Agent to compile proofs.
+
+* Installation
+
+1. Clone the repository:
+   #+begin_src sh
+   git clone <repository-url>
+   cd pyagents
+   #+end_src
+
+2. Install dependencies using Poetry:
+   #+begin_src sh
+   poetry install
+   #+end_src
+
+3. Pull necessary Ollama models:
+   #+begin_src sh
+   ollama pull qwen2.5-coder:14b
+   ollama pull qwen3:14b
+   # ... pull other models as needed
+   #+end_src
+
+* Usage
+
+** Running the Orchestrator (Recommended)
+This gives you access to all tools via a single interface.
+
+#+begin_src sh
+./run.sh orchestrator_agent.py
+#+end_src
+
+Follow the interactive prompts:
+1. Provide a project path for the **Librarian** (or press Enter for current dir).
+2. Enter your **Research Request**.
+
+** Running Specialized Agents Independently
+
+*** Deep Research
+#+begin_src sh
+./run.sh deep_research_agent.py
+#+end_src
+
+*** Coding Agent
+#+begin_src sh
+./run.sh coding_agent.py
+#+end_src
+
+*** Math Agent
+#+begin_src sh
+./run.sh math_agent.py
+#+end_src
+
+* Dependencies
+
+Key libraries used:
+- ~langchain~ / ~langgraph~: Agent orchestration and state management.
+- ~langchain-ollama~: Interface for local LLMs.
+- ~duckduckgo-search~: Web search capabilities.
+- ~rich~: Beautiful terminal UI.
+- ~prompt_toolkit~: Robust command-line input.
+- ~beautifulsoup4~: Web scraping.
+- ~faiss-cpu~: Vector store for RAG.
