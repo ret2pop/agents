@@ -1,3 +1,5 @@
+import os
+
 # Models
 ORCHESTRATOR_MODEL = "qwen2.5-coder:14b"
 VISION_MODEL = "qwen2.5-vl:7b"
@@ -27,6 +29,9 @@ MATH_MODEL_CONFIG = {
 }
 
 SEARCH_MODEL = "qwen2.5-coder:14b"
+
+# API Keys
+BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY")
 
 # Limits
 MAX_DEPTH = 3

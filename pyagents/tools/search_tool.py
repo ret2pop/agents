@@ -3,10 +3,10 @@ import requests
 import warnings
 from bs4 import BeautifulSoup
 from typing import List, Dict, Optional
-from duckduckgo_search import DDGS
 from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage
 from pyagents.config import SEARCH_MODEL, MAX_SEARCH_RESULTS, MAX_READ_COUNT
+from pyagents.tools.search_api import HybridSearchProvider
 
 # --- WARNING SUPPRESSION ---
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -18,6 +18,7 @@ class WebScout:
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
+        self.search_provider = HybridSearchProvider()
 
     def generate_queries(self, objective: str) -> List[str]:
         """Brainstorms search queries."""
@@ -39,21 +40,20 @@ class WebScout:
             return [objective]
 
     def search_metadata(self, queries: List[str]) -> List[Dict]:
-        """Gets titles and snippets using a Context Manager."""
+        """Gets titles and snippets using the Search Provider."""
         aggregated = []
         seen = set()
         print(f"[WebScout] 🕸️  Searching...")
 
-        with DDGS() as ddgs:
-            for q in queries:
-                try:
-                    results = ddgs.text(q, max_results=5)
-                    for r in results:
-                        if r['href'] not in seen:
-                            seen.add(r['href'])
-                            aggregated.append(r)
-                except Exception as e:
-                    print(f"Search failed for {q}: {e}")
+        for q in queries:
+            try:
+                results = self.search_provider.search(q, max_results=5)
+                for r in results:
+                    if r['href'] not in seen:
+                        seen.add(r['href'])
+                        aggregated.append(r)
+            except Exception as e:
+                print(f"Search failed for {q}: {e}")
 
         return aggregated
 
