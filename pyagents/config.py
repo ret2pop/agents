@@ -3,6 +3,7 @@ import os
 # Models
 ORCHESTRATOR_MODEL = "qwen2.5-coder:14b"
 VISION_MODEL = "qwen2.5-vl:7b"
+EMBEDDING_MODEL = "nomic-embed-text-v2-moe:latest"
 
 CODING_MODEL_CONFIG = {
     "coder": "qwen2.5-coder:14b",
