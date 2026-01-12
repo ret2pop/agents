@@ -1,11 +1,11 @@
 [tool.poetry]
-name = "deep-research"
+name = "pyagents"
 version = "0.1.0"
 description = ""
 authors = ["Preston Pan <ret2pop@gmail.com>"]
 
 [project]
-name = "deep-research"
+name = "pyagents"
 version = "0.1.0"
 description = ""
 authors = [
