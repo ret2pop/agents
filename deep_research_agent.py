@@ -2,6 +2,8 @@ import re
 import operator
 import requests
 import sqlite3
+import os
+import sys
 from bs4 import BeautifulSoup
 from typing import Annotated, List, TypedDict, Optional
 
@@ -19,12 +21,22 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.style import Style
 from rich.box import ROUNDED
 
+# --- PROMPT TOOLKIT (ROBUST LINE EDITING) ---
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.styles import Style as PromptStyle
+except ImportError:
+    print("Error: This script requires 'prompt_toolkit' for line editing.")
+    print("Please run: pip install prompt_toolkit")
+    sys.exit(1)
+
 console = Console()
 
 # --- CONFIGURATION ---
 MODEL_CONFIG = {
-    "global_planner": "qwen3:14b", # High-level outliner
-    "planner": "qwen3:14b",        # Specific section researcher
+    "global_planner": "qwen3:14b", 
+    "planner": "qwen3:14b",        
     "researcher": "qwen3:14b",
     "writer": "qwen3:14b",
     "editor": "ministral-3:14b",
@@ -61,22 +73,14 @@ def scrape_text(url: str):
         return f"Error reading page: {str(e)}"
 
 # --- HELPER FUNCTIONS ---
-
-def clean_text(text: str) -> str:
-    """Removes <think> tags."""
-    cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-    return cleaned.strip()
-
 def pretty_print_queries(queries: List[str], topic: str):
     """
     Renders a stylized panel for research queries to the console.
     """
-    # Format the content with numbered steps
     content = ""
     for i, query in enumerate(queries, 1):
         content += f"[bold cyan]{i}.[/bold cyan] [white]{query}[/white]\n"
     
-    # Create a compact panel
     console.print(Panel(
         content.strip(),
         title=f"[bold yellow]Research Plan: {topic}[/bold yellow]",
@@ -85,6 +89,11 @@ def pretty_print_queries(queries: List[str], topic: str):
         padding=(1, 2),
         expand=False
     ))
+
+def clean_text(text: str) -> str:
+    """Removes <think> tags."""
+    cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    return cleaned.strip()
 
 def run_llm(role: str, user_prompt: str, system_prompt: str = None, temperature=0.1, model_override: str = None) -> str:
     """Centralized LLM runner with auto-cleaning and model override support."""
@@ -119,7 +128,6 @@ class AgentState(TypedDict):
     # LOCAL STATE (Per Section)
     topic: str                    # Current sub-topic
     research_plan: List[str]
-    # Removed operator.add annotation to allow clearing/overwriting between sections
     research_notes: List[str]      
     current_draft: str
     critiques: List[str]
@@ -157,7 +165,6 @@ def global_planner_node(state: AgentState):
         "section_plan": sections, 
         "current_section_idx": 0, 
         "completed_sections": [],
-        # Initialize local state
         "research_notes": [],
         "critiques": []
     }
@@ -171,7 +178,6 @@ def section_initiator_node(state: AgentState):
     
     console.print(Panel(f"Starting Section {idx+1}/{len(sections)}: {current_topic}", style="bold blue"))
     
-    # We RESET local variables here so the previous section doesn't contaminate the new one
     return {
         "topic": current_topic,
         "loop_count": 0,
@@ -194,7 +200,8 @@ def deep_researcher_node(state: AgentState):
                 f"Main Report Topic: {main_topic}\n"
                 f"Current Section: {topic}\n"
                 "Generate 3 highly specific search queries to gather information specifically for this section.\n"
-                "Return ONLY the queries as a list, separated by newlines."
+                "Return ONLY the queries as a list, separated by newlines.\n"
+                "Make the queries in few words and use KEYWORDS only to make the search."
             )
         else:
             critique_text = "\n".join(critiques)
@@ -202,7 +209,8 @@ def deep_researcher_node(state: AgentState):
                 f"Section: {topic}\n"
                 f"Address these gaps: {critique_text}\n"
                 "Generate 2 NEW search queries to fill these gaps.\n"
-                "Return ONLY the queries as a list, separated by newlines."
+                "Return ONLY the queries as a list, separated by newlines.\n"
+                "Make the queries in few words and use KEYWORDS only to make the search."
             )
 
         response = run_llm("planner", prompt)
@@ -213,7 +221,6 @@ def deep_researcher_node(state: AgentState):
 
 def researcher_node(state: AgentState):
     plan = state["research_plan"]
-    # We must explicitly grab current notes because we removed operator.add
     existing_notes = state["research_notes"] 
     new_notes = []
     
@@ -241,7 +248,6 @@ def researcher_node(state: AgentState):
             summary = run_llm("researcher", extraction_prompt)
             new_notes.append(f"### Deep Dive on '{query}':\n{summary}\n")
 
-    # Manually append since we aren't using operator.add
     return {"research_notes": existing_notes + new_notes}
 
 def writer_node(state: AgentState):
@@ -259,6 +265,8 @@ def writer_node(state: AgentState):
             f"Current Section to write: {topic}\n"
             f"Research Notes:\n{flat_notes}\n\n"
             "Write this specific section. Do not write a whole intro/conclusion for the whole report, just this part.\n"
+            "Use information from ONLY the research notes.\n"
+            "If no research notes are relevant, then write a factual paragraph stating no relevant information was found, and write that more research is needed.\n"
             "Use academic tone. Cite sources inline [1].\n"
             "Output ONLY the section text."
         )
@@ -269,6 +277,8 @@ def writer_node(state: AgentState):
             f"New Notes:\n{flat_notes}\n\n"
             "Integrate new findings. Output the updated section.\n"
             "Determine if the critiques are valid first before integrating them.\n"
+            "Use information from ONLY the research notes.\n"
+            "If no research notes are relevant, then write a factual paragraph stating no relevant information was found, and write that more research is needed.\n"
             "Also make sure to retain all cited sources and their inline citations [1]."
         )
 
@@ -286,11 +296,11 @@ def quorum_node(state: AgentState):
         identify_prompt = (
             f"Draft:\n{draft[:4000]}...\n\n"
             "Identify one weak/unverified claim. Generate a search query to check it.\n"
-            "Output ONLY the search query."
+            "Output ONLY the search query.\n"
+            "Make the query in few words and use KEYWORDS only to make the search."
         )
         skeptic_query = run_llm("skeptic", identify_prompt, temperature=0.1, model_override=model).strip().replace('"', '')
         
-        # Quick search check
         skeptic_evidence = search_tool.invoke(skeptic_query)
         
         critique_prompt = (
@@ -328,7 +338,6 @@ def section_compiler_node(state: AgentState):
     current_idx = state["current_section_idx"]
     topic = state["topic"]
     
-    # Store the result
     completed = state["completed_sections"]
     completed.append(f"## {topic}\n\n{finished_section_text}\n\n")
     
@@ -375,9 +384,7 @@ def check_global_progress(state: AgentState):
         return "next_section"
     return "finalize"
 
-# 1. SETUP SQLITE CHECKPOINTER
-memory = SqliteSaver.from_conn_string("checkpoints.sqlite")
-
+# 1. SETUP GRAPH
 workflow = StateGraph(AgentState)
 
 # Global Nodes
@@ -387,7 +394,7 @@ workflow.add_node("section_compiler", section_compiler_node)
 workflow.add_node("final_editor", final_editor_node)
 
 # Deep Research Sub-Nodes
-workflow.add_node("deep_researcher", deep_researcher_node) # Renamed from planner
+workflow.add_node("deep_researcher", deep_researcher_node) 
 workflow.add_node("researcher", researcher_node)
 workflow.add_node("writer", writer_node)
 workflow.add_node("quorum", quorum_node)
@@ -426,23 +433,31 @@ workflow.add_conditional_edges(
 
 workflow.add_edge("final_editor", END)
 
-# 2. COMPILE WITH MEMORY
-app = workflow.compile(checkpointer=memory)
-
 # --- RUN ---
 if __name__ == "__main__":
     console.print(Panel.fit("[bold white]Deep Research Agent v2[/bold white]", style="blue"))
+
+    # 1. SETUP PROMPT SESSION (Robust line editing + History)
+    history_file = os.path.expanduser("~/.deep_research_history")
+    session = PromptSession(history=FileHistory(history_file))
     
     with SqliteSaver.from_conn_string("checkpoints.sqlite") as memory:
-        app = workflow.compile(checkpointer=memory)
+        research_app = workflow.compile(checkpointer=memory)
 
-        session_id = console.input("[bold yellow]Enter Session ID (or press Enter): [/bold yellow]").strip()
+        # 2. INPUT 1: SESSION ID
+        console.print("[bold yellow]Enter Session ID[/bold yellow] (or press Enter):", end=" ")
+        session_id = session.prompt("").strip()
+        
         topic = ""
         
         if not session_id:
             import uuid
             session_id = str(uuid.uuid4())[:8]
-            topic = console.input("[bold yellow]Enter MAIN research topic:[/bold yellow] ")
+            
+            # 3. INPUT 2: TOPIC
+            console.print("[bold yellow]Enter MAIN research topic:[/bold yellow]")
+            topic = session.prompt("> ").strip()
+            
             console.print(f"[dim]Starting new session: {session_id}[/dim]")
             
             inputs = {
@@ -450,7 +465,6 @@ if __name__ == "__main__":
                 "section_plan": [], 
                 "completed_sections": [], 
                 "current_section_idx": 0,
-                # Initial dummy values for graph validation
                 "topic": "init",
                 "research_plan": [], 
                 "research_notes": [], 
@@ -462,14 +476,14 @@ if __name__ == "__main__":
                 "configurable": {"thread_id": session_id},
                 "recursion_limit": 150
             }
-            final_state = app.invoke(inputs, config=config)
+            final_state = research_app.invoke(inputs, config=config)
         else:
             config = {
                 "configurable": {"thread_id": session_id},
                 "recursion_limit": 150
             }
             console.print("[dim]Resuming...[/dim]")
-            final_state = app.invoke(None, config=config) 
+            final_state = research_app.invoke(None, config=config) 
 
         filename = f"final_report_{session_id}.md"
         with open(filename, "w", encoding="utf-8") as f:
