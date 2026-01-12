@@ -1,12 +1,11 @@
 import json
-import requests
 import warnings
-from bs4 import BeautifulSoup
 from typing import List, Dict, Optional
 from duckduckgo_search import DDGS
 from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage
 from pyagents.config import SEARCH_MODEL, MAX_SEARCH_RESULTS, MAX_READ_COUNT
+from pyagents.utils.crawler import crawl_url
 
 # --- WARNING SUPPRESSION ---
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -15,9 +14,7 @@ warnings.filterwarnings("ignore", category=ResourceWarning)
 class WebScout:
     def __init__(self):
         self.llm = ChatOllama(model=SEARCH_MODEL, temperature=0.2)
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
+        # Headers no longer needed for crawl4ai
 
     def generate_queries(self, objective: str) -> List[str]:
         """Brainstorms search queries."""
@@ -85,27 +82,9 @@ class WebScout:
             return results[:MAX_READ_COUNT]
 
     def scrape_page(self, url: str) -> str:
-        """Fetches and cleans text from a URL."""
-        try:
-            with requests.Session() as session:
-                resp = session.get(url, headers=self.headers, timeout=5)
-
-            if resp.status_code != 200:
-                return f"Error: Status {resp.status_code}"
-
-            soup = BeautifulSoup(resp.content, 'html.parser')
-
-            for script in soup(["script", "style", "nav", "footer", "header", "aside"]):
-                script.extract()
-
-            text = soup.get_text()
-            lines = (line.strip() for line in text.splitlines())
-            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-            text = '\n'.join(chunk for chunk in chunks if chunk)
-
-            return text[:4000]
-        except Exception as e:
-            return f"Scrape Error: {str(e)}"
+        """Fetches and cleans text from a URL using crawl4ai."""
+        text = crawl_url(url)
+        return text[:4000]
 
     def synthesize_report(self, objective: str, data: List[Dict]) -> str:
         """Writes the final prose summary with citations."""
