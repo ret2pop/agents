@@ -1,35 +1,85 @@
+import os
 from abc import ABC, abstractmethod
 from typing import List, Dict
 import requests
+from dotenv import load_dotenv
 from duckduckgo_search import DDGS
-from pyagents.config import BRAVE_API_KEY, GOOGLE_API_KEY, GOOGLE_CSE_ID, MAX_SEARCH_RESULTS
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Set default max results from env or default to 5
+DEFAULT_MAX_RESULTS = int(os.getenv("MAX_SEARCH_RESULTS", "5"))
 
 class SearchProvider(ABC):
     @abstractmethod
-    def search(self, query: str, max_results: int = 5) -> List[Dict]:
+    def search(self, query: str, max_results: int = DEFAULT_MAX_RESULTS) -> List[Dict]:
         """
         Executes a search query and returns a list of results.
         Each result should be a dictionary with 'title', 'href', and 'body' keys.
         """
         pass
 
+class TavilySearchProvider(SearchProvider):
+    def __init__(self, api_key: str = None):
+        self.api_key = (api_key or os.getenv("TAVILY_API_KEY", "")).strip()
+        self.base_url = "https://api.tavily.com/search"
+
+    def search(self, query: str, max_results: int = DEFAULT_MAX_RESULTS) -> List[Dict]:
+        if not self.api_key:
+            raise ValueError("Tavily API key not provided in init or .env")
+
+        # Tavily payload
+        payload = {
+            "api_key": self.api_key,
+            "query": query,
+            "search_depth": "basic",
+            "max_results": max_results,
+            "include_answer": False,
+            "include_images": False,
+            "include_raw_content": False
+        }
+
+        try:
+            # Tavily uses a POST request
+            response = requests.post(self.base_url, json=payload, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+
+            results = []
+            if 'results' in data:
+                for item in data['results']:
+                    results.append({
+                        'title': item.get('title', ''),
+                        'href': item.get('url', ''),
+                        'body': item.get('content', '')
+                    })
+            return results
+        except requests.exceptions.RequestException as e:
+            # Silently re-raise to be caught by Hybrid provider
+            raise e
+
 class BraveSearchProvider(SearchProvider):
-    def __init__(self, api_key: str = BRAVE_API_KEY):
-        self.api_key = api_key
+    def __init__(self, api_key: str = None):
+        self.api_key = (api_key or os.getenv("BRAVE_API_KEY", "")).strip()
         self.base_url = "https://api.search.brave.com/res/v1/web/search"
 
-    def search(self, query: str, max_results: int = 5) -> List[Dict]:
+    def search(self, query: str, max_results: int = DEFAULT_MAX_RESULTS) -> List[Dict]:
         if not self.api_key:
-            raise ValueError("Brave API key not provided")
+            raise ValueError("Brave API key not provided in init or .env")
 
         headers = {
             "Accept": "application/json",
             "Accept-Encoding": "gzip",
             "X-Subscription-Token": self.api_key
         }
+        
+        # Brave limits 'count' to 20 per request
+        safe_count = min(max_results, 20)
+        
         params = {
             "q": query,
-            "count": max_results
+            "count": safe_count
         }
 
         try:
@@ -47,24 +97,26 @@ class BraveSearchProvider(SearchProvider):
                     })
             return results
         except requests.exceptions.RequestException as e:
-            print(f"[BraveSearchProvider] Error: {e}")
             raise e
 
 class GoogleSearchProvider(SearchProvider):
-    def __init__(self, api_key: str = GOOGLE_API_KEY, cse_id: str = GOOGLE_CSE_ID):
-        self.api_key = api_key
-        self.cse_id = cse_id
+    def __init__(self, api_key: str = None, cse_id: str = None):
+        self.api_key = (api_key or os.getenv("GOOGLE_API_KEY", "")).strip()
+        self.cse_id = (cse_id or os.getenv("GOOGLE_CSE_ID", "")).strip()
         self.base_url = "https://www.googleapis.com/customsearch/v1"
 
-    def search(self, query: str, max_results: int = 5) -> List[Dict]:
+    def search(self, query: str, max_results: int = DEFAULT_MAX_RESULTS) -> List[Dict]:
         if not self.api_key or not self.cse_id:
-            raise ValueError("Google API key or CSE ID not provided")
+            raise ValueError("Google API key or CSE ID not provided in init or .env")
+
+        # Google API 'num' must be <= 10
+        safe_num = min(max_results, 10)
 
         params = {
             "q": query,
             "key": self.api_key,
             "cx": self.cse_id,
-            "num": max_results
+            "num": safe_num
         }
 
         try:
@@ -82,11 +134,10 @@ class GoogleSearchProvider(SearchProvider):
                     })
             return results
         except requests.exceptions.RequestException as e:
-            print(f"[GoogleSearchProvider] Error: {e}")
             raise e
 
 class DuckDuckGoSearchProvider(SearchProvider):
-    def search(self, query: str, max_results: int = 5) -> List[Dict]:
+    def search(self, query: str, max_results: int = DEFAULT_MAX_RESULTS) -> List[Dict]:
         results = []
         try:
             with DDGS() as ddgs:
@@ -97,36 +148,36 @@ class DuckDuckGoSearchProvider(SearchProvider):
                         'href': r.get('href', ''),
                         'body': r.get('body', '')
                     })
-        except Exception as e:
-            print(f"[DuckDuckGoSearchProvider] Error: {e}")
-            raise e
+        except Exception:
+            # Silently fail or re-raise; since this is the fallback, returning empty is appropriate
+            pass
         return results
 
 class HybridSearchProvider(SearchProvider):
     def __init__(self):
+        self.tavily = TavilySearchProvider()
         self.brave = BraveSearchProvider()
         self.google = GoogleSearchProvider()
         self.ddg = DuckDuckGoSearchProvider()
 
-    def search(self, query: str, max_results: int = 5) -> List[Dict]:
-        # Try Brave
+    def search(self, query: str, max_results: int = DEFAULT_MAX_RESULTS) -> List[Dict]:
+        # 1. Try Tavily (Primary)
         try:
-            print(f"[HybridSearchProvider] Trying Brave Search for '{query}'...")
+            return self.tavily.search(query, max_results)
+        except Exception:
+            pass
+
+        # 2. Try Brave
+        try:
             return self.brave.search(query, max_results)
-        except Exception as e:
-            print(f"[HybridSearchProvider] Brave Search failed: {e}")
+        except Exception:
+            pass
 
-        # Try Google
+        # 3. Try Google
         try:
-            print(f"[HybridSearchProvider] Falling back to Google Search for '{query}'...")
             return self.google.search(query, max_results)
-        except Exception as e:
-            print(f"[HybridSearchProvider] Google Search failed: {e}")
+        except Exception:
+            pass
 
-        # Fallback to DuckDuckGo
-        try:
-            print(f"[HybridSearchProvider] Falling back to DuckDuckGo for '{query}'...")
-            return self.ddg.search(query, max_results)
-        except Exception as e:
-            print(f"[HybridSearchProvider] DuckDuckGo Search failed: {e}")
-            return []
+        # 4. Fallback to DuckDuckGo (always works, or returns empty list)
+        return self.ddg.search(query, max_results)

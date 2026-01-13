@@ -1,2 +1,7 @@
 __pycache__/**
+pyagents/__pycache__/**
+pyagents/agents/__pycache__/**
+pyagents/tools/__pycache__/**
 .pytest_cache/**
+.env
+checkpoints.sqlite

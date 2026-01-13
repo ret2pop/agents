@@ -194,7 +194,8 @@ def researcher_node(state: AgentState):
 
             selector_prompt = (
                 f"Query: {query}\nSearch Results: {search_results}\n\n"
-                "Return the single best URL for deep reading. Return ONLY the URL."
+                "Return the single best URL for deep reading. Return ONLY the URL.\n"
+                "Return from RESULTS."
             )
             best_url = run_llm(DEEP_RESEARCH_MODEL_CONFIG["planner"], selector_prompt).strip()
 
@@ -243,7 +244,6 @@ def writer_node(state: AgentState):
             "Determine if the critiques are valid first before integrating them.\n"
             "Use information from ONLY the research notes.\n"
             "If no research notes are relevant, then write a factual paragraph stating no relevant information was found, and write that more research is needed.\n"
-            "Also make sure to retain all cited sources and their inline citations [1]."
         )
 
     content = run_llm(DEEP_RESEARCH_MODEL_CONFIG["writer"], prompt, system_prompt=system, temperature=0.3)
@@ -292,6 +292,9 @@ def refiner_node(state: AgentState):
         f"Critiques:\n{critiques}\n\n"
         f"Notes:\n{flat_notes}\n\n"
         "Rewrite the draft to address critiques. Preserve citations. Output the final section text.\n"
+        "Use only information from the notes provided to you.\n"
+        "If you cannot address the critiques then state that it cannot be addressed because there isn't enough information.\n"
+        "Use academic tone. Cite sources inline [1].\n"
         "First determine if the critique is worth addressing before addressing them."
     )
 
