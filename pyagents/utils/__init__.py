@@ -8,6 +8,8 @@ from typing import List, Optional
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from .crawler import scrape_text_crawl4ai as crawl
+
 def clean_text(text: str) -> str:
     """Removes <think> tags from model output."""
     cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)

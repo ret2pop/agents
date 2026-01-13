@@ -25,8 +25,7 @@ except ImportError:
     sys.exit(1)
 
 from pyagents.config import DEEP_RESEARCH_MODEL_CONFIG
-from pyagents.utils import run_llm
-from pyagents.utils.crawler import scrape_text_crawl4ai
+from pyagents.utils import run_llm, crawl
 from pyagents.tools.search_tool import WebScout # Or use DuckDuckGoSearchResults directly as before?
 # The original code used DuckDuckGoSearchResults and a custom `scrape_text` function.
 # Let's try to reuse `WebScout` concepts or stick to the original implementation but refactored.
@@ -42,7 +41,7 @@ max_loop = 2 # Max loops PER SECTION
 def scrape_text(url: str):
     """Fetches and cleans text from a URL for deep reading."""
     try:
-        text = scrape_text_crawl4ai(url)
+        text = crawl(url)
         return text[:10000]
     except Exception as e:
         return f"Error reading page: {str(e)}"

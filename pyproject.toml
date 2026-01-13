@@ -24,6 +24,8 @@ prompt-toolkit = ">=3.0.52,<4.0.0"
 pytest = ">=9.0.2,<10.0.0"
 faiss-cpu = ">=1.13.2,<2.0.0"
 python-dotenv = "^1.2.1"
+crawl4ai = "^0.7.8"
+nest-asyncio = "^1.6.0"
 
 [tool.poetry.group.dev.dependencies]
 
