@@ -26,15 +26,12 @@ except ImportError:
 
 from pyagents.config import DEEP_RESEARCH_MODEL_CONFIG
 from pyagents.utils import run_llm
+from pyagents.utils.crawler import scrape_text_crawl4ai
 from pyagents.tools.search_tool import WebScout # Or use DuckDuckGoSearchResults directly as before?
 # The original code used DuckDuckGoSearchResults and a custom `scrape_text` function.
 # Let's try to reuse `WebScout` concepts or stick to the original implementation but refactored.
 # The original implementation used DuckDuckGoSearchResults + requests/bs4 for scraping.
 # I'll stick to the original logic for now but use the shared `run_llm`.
-
-import requests
-from bs4 import BeautifulSoup
-import re
 
 console = Console()
 
@@ -45,19 +42,7 @@ max_loop = 2 # Max loops PER SECTION
 def scrape_text(url: str):
     """Fetches and cleans text from a URL for deep reading."""
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        response = requests.get(url, headers=headers, timeout=10)
-
-        if response.status_code != 200:
-            return f"Failed to load page (Status: {response.status_code})"
-
-        soup = BeautifulSoup(response.content, 'html.parser')
-
-        for script in soup(["script", "style", "nav", "footer", "iframe"]):
-            script.extract()
-
-        text = soup.get_text(separator=' ')
-        text = re.sub(r'\s+', ' ', text).strip()
+        text = scrape_text_crawl4ai(url)
         return text[:10000]
     except Exception as e:
         return f"Error reading page: {str(e)}"
