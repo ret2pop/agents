@@ -24,9 +24,9 @@ except ImportError:
     print("Please run: pip install prompt_toolkit")
     sys.exit(1)
 
-from pyagents.config import DEEP_RESEARCH_MODEL_CONFIG
+from pyagents.config import DEEP_RESEARCH_MODEL_CONFIG, MAX_SEARCH_RESULTS
 from pyagents.utils import run_llm
-from pyagents.tools.search_tool import WebScout # Or use DuckDuckGoSearchResults directly as before?
+from pyagents.tools.search_tool import WebScout, HybridSearchProvider # Or use DuckDuckGoSearchResults directly as before?
 # The original code used DuckDuckGoSearchResults and a custom `scrape_text` function.
 # Let's try to reuse `WebScout` concepts or stick to the original implementation but refactored.
 # The original implementation used DuckDuckGoSearchResults + requests/bs4 for scraping.
@@ -39,8 +39,8 @@ import re
 console = Console()
 
 # --- TOOLING ---
-search_tool = DuckDuckGoSearchResults(num_results=10)
-max_loop = 2 # Max loops PER SECTION
+search_tool = HybridSearchProvider(MAX_SEARCH_RESULTS)
+max_loop = 3 # Max loops PER SECTION
 
 def scrape_text(url: str):
     """Fetches and cleans text from a URL for deep reading."""
@@ -183,35 +183,92 @@ def deep_researcher_node(state: AgentState):
     pretty_print_queries(plan, topic)
     return {"research_plan": plan}
 
+from rich.panel import Panel
+from rich.text import Text
+from rich.console import Console
+
+console = Console()
+
 def researcher_node(state: AgentState):
     plan = state["research_plan"]
     existing_notes = state["research_notes"]
     new_notes = []
 
-    for query in plan:
-        with console.status(f"[yellow]Searching: {query}...", spinner="earth"):
-            search_results = search_tool.invoke(query)
+    console.print(f"[bold cyan]Beginning research on {len(plan)} topics...[/bold cyan]")
 
+    for query in plan:
+        # Create a visual container for this specific query's lifecycle
+        console.print(Panel(f"[bold blue]Researching:[/bold blue] {query}", expand=False))
+        
+        search_results = ""
+        newest_query = query
+        final_search_query = query # Track which query actually won
+        
+        # --- PHASE 1: SEARCH & REFINE ---
+        with console.status(f"[yellow]Searching web for:[/yellow] {query}...", spinner="earth") as status:
+            for attempt in range(3):
+                search_results = search_tool.search(newest_query)
+                
+                # Validation Prompt
+                filter_prompt = (
+                    f"Query {newest_query}\nSearch results {search_results}\n\n"
+                    "Decide if the queries are relevant/promising."
+                    "If the search results are good, say only the word: YES. In this case, ONLY OUTPUT YES.\n\n"
+                    "If almost all results are unpromising, create a better search query\n"
+                    "that is simpler than the above query, but that retains the spirit of the original query.\n"
+                )
+                
+                # Check results
+                filter_result = run_llm(DEEP_RESEARCH_MODEL_CONFIG["planner"], filter_prompt)
+                
+                if "YES" in filter_result:
+                    final_search_query = newest_query
+                    console.print(f"  [green]✓[/green] Found relevant results for: [italic]{newest_query}[/italic]")
+                    break
+                else:
+                    # Provide feedback on query refinement
+                    old_query = newest_query
+                    newest_query = filter_result.strip()
+                    console.print(f"  [yellow]↻[/yellow] Results weak. Refining query: [strike]{old_query}[/strike] -> [bold]{newest_query}[/bold]")
+                    status.update(f"[yellow]Retrying with:[/yellow] {newest_query}...")
+
+        # --- PHASE 2: SELECT URL ---
+        with console.status("[bold cyan]Selecting best source...", spinner="dots"):
             selector_prompt = (
-                f"Query: {query}\nSearch Results: {search_results}\n\n"
+                f"Query: {final_search_query}\nSearch Results: {search_results}\n\n"
                 "Return the single best URL for deep reading. Return ONLY the URL.\n"
                 "Return from RESULTS."
             )
             best_url = run_llm(DEEP_RESEARCH_MODEL_CONFIG["planner"], selector_prompt).strip()
-
+        
         if "http" not in best_url:
+            console.print(f"  [red]✗[/red] No valid URL found. Saving raw search results.")
             new_notes.append(f"### Findings for '{query}':\n{search_results}\n")
             continue
 
-        with console.status(f"[yellow]Reading: {best_url}...", spinner="bouncingBall"):
-            page_content = scrape_text(best_url)
-            extraction_prompt = (
-                f"Query: {query}\nSource: {best_url}\nContent: {page_content}\n\n"
-                "Extract comprehensive findings, statistics, and arguments.\nFormat: [Fact] (Source: URL)\n"
-                "If the source is not relevant to the query, then use the format [no relevant facts found] (Source: URL)"
-            )
-            summary = run_llm(DEEP_RESEARCH_MODEL_CONFIG["researcher"], extraction_prompt)
-            new_notes.append(f"### Deep Dive on '{query}':\n{summary}\n")
+        console.print(f"  [cyan]→[/cyan] Deep diving into: [underline blue]{best_url}[/underline blue]")
+
+        # --- PHASE 3: SCRAPE & EXTRACT ---
+        with console.status(f"[bold magenta]Reading & Extracting content...", spinner="bouncingBall"):
+            try:
+                page_content = scrape_text(best_url)
+                
+                extraction_prompt = (
+                    f"Query: {query}\nSource: {best_url}\nContent: {page_content}\n\n"
+                    "Extract comprehensive findings, statistics, and arguments.\nFormat: [Fact] (Source: URL)\n"
+                    "If the source is not relevant to the query, then use the format [no relevant facts found] (Source: URL)"
+                )
+                
+                summary = run_llm(DEEP_RESEARCH_MODEL_CONFIG["researcher"], extraction_prompt)
+                new_notes.append(f"### Deep Dive on '{query}':\n{summary}\n")
+                
+                # Preview the result size to the user
+                lines = summary.count('\n') + 1
+                console.print(f"  [green]✓[/green] Extracted {lines} lines of notes.")
+                
+            except Exception as e:
+                console.print(f"  [red]![/red] Failed to read {best_url}: {e}")
+                new_notes.append(f"### Findings for '{query}':\nFailed to scrape {best_url}. Raw search results:\n{search_results}\n")
 
     return {"research_notes": existing_notes + new_notes}
 
@@ -267,7 +324,7 @@ def quorum_node(state: AgentState):
         # run_llm takes model_name as first arg.
         skeptic_query = run_llm(model, identify_prompt, temperature=0.1).strip().replace('"', '')
 
-        skeptic_evidence = search_tool.invoke(skeptic_query)
+        skeptic_evidence = search_tool.search(skeptic_query)
 
         critique_prompt = (
             f"Draft:\n{draft[:4000]}...\n"
@@ -454,7 +511,7 @@ def main():
         else:
             config = {
                 "configurable": {"thread_id": session_id},
-                "recursion_limit": 150
+                "recursion_limit": 300
             }
             console.print("[dim]Resuming...[/dim]")
             final_state = app_with_memory.invoke(None, config=config)

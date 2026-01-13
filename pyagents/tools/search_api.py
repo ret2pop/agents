@@ -154,28 +154,29 @@ class DuckDuckGoSearchProvider(SearchProvider):
         return results
 
 class HybridSearchProvider(SearchProvider):
-    def __init__(self):
+    def __init__(self, num_results=10):
         self.tavily = TavilySearchProvider()
         self.brave = BraveSearchProvider()
         self.google = GoogleSearchProvider()
         self.ddg = DuckDuckGoSearchProvider()
+        self.num_results = num_results
 
-    def search(self, query: str, max_results: int = DEFAULT_MAX_RESULTS) -> List[Dict]:
+    def search(self, query: str, max_results: int = self.num_results) -> List[Dict]:
         # 1. Try Tavily (Primary)
         try:
             return self.tavily.search(query, max_results)
         except Exception:
             pass
 
-        # 2. Try Brave
+        # 2. Try Google
         try:
-            return self.brave.search(query, max_results)
+            return self.google.search(query, max_results)
         except Exception:
             pass
 
-        # 3. Try Google
+        # 3. Try Brave
         try:
-            return self.google.search(query, max_results)
+            return self.brave.search(query, max_results)
         except Exception:
             pass
 
